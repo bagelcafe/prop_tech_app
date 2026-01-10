@@ -7,6 +7,8 @@ from pydantic import BaseModel
 import logging
 import os
 from datetime import datetime
+from dateutil.relativedelta import relativedelta
+from stats_service import stats_service
 
 # --- 로깅 설정 ---
 LOG_DIR = "log"
@@ -63,10 +65,13 @@ async def log_requests(request: Request, call_next):
     # 정적 파일 외의 API 호출만 기록하거나, 전체 기록하거나. 
     # 요구사항: 접속 기록 정보 -> 전체 기록이 안전.
     if not url.startswith("/static") and url != "/favicon.ico":
+        # 1. 기존 파일 로깅 (디버깅용 유지)
         logger = get_today_logger()
         log_msg = f"{method} {url} ?{query} => Status: {status_code}"
-        # Extra dict를 사용하여 format string의 client_ip를 채움
         logger.info(log_msg, extra={"client_ip": client_ip})
+        
+        # 2. 통계 서비스 집계 (JSON 저장)
+        stats_service.record_request(client_ip)
         
     return response
 
@@ -129,94 +134,68 @@ def search_apt_data(
     return data
 
 @app.get("/api/stats")
-def get_stats():
-    """오늘 로그와 최근 7일간의 일별 접속 통계를 반환"""
+def get_stats(
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)")
+):
+    """통계 서비스(JSON)를 통해 접속 통계 반환"""
     
-    # 1. 오늘 로그 (기존 로직 유지)
+    # 1. 오늘 날짜 로그 (실시간 모니터링용 - 기존 로직 유지)
     today_str = datetime.now().strftime("%Y%m%d")
     log_filename = f"service_log_{today_str}.log"
     log_path = os.path.join(LOG_DIR, log_filename)
     
     logs = []
-    
-    # 공통 파싱 로직 함수
-    def parse_log_file(path):
-        parsed_data = []
-        if os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    for line in f:
-                        try:
-                            parts = line.split(" - ", 2)
-                            if len(parts) >= 3:
-                                time_part = parts[0].split(",")[0]
-                                ip_part = parts[1]
-                                msg_part = parts[2]
+    if os.path.exists(log_path):
+        try:
+            with open(log_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        parts = line.split(" - ", 2)
+                        if len(parts) >= 3:
+                            time_part = parts[0].split(",")[0]
+                            ip_part = parts[1]
+                            msg_part = parts[2]
+                            
+                            if "=> Status:" in msg_part:
+                                req_info, status_str = msg_part.split("=> Status:")
+                                status = int(status_str.strip())
+                                url = req_info.strip()
+                            else:
+                                url = msg_part.strip()
+                                status = 0
                                 
-                                if "=> Status:" in msg_part:
-                                    req_info, status_str = msg_part.split("=> Status:")
-                                    status = int(status_str.strip())
-                                    url = req_info.strip()
-                                else:
-                                    url = msg_part.strip()
-                                    status = 0
-                                    
-                                parsed_data.append({
-                                    "time": time_part,
-                                    "ip": ip_part,
-                                    "url": url,
-                                    "status": status
-                                })
-                        except:
-                            continue
-            except Exception as e:
-                print(f"Error reading log {path}: {e}")
-        return parsed_data
+                            logs.append({
+                                "time": time_part,
+                                "ip": ip_part,
+                                "url": url,
+                                "status": status
+                            })
+                    except: continue
+        except: pass
 
-    logs = parse_log_file(log_path)
+    # 2. 통계 정보 (JSON 기반)
+    # 기본값 설정: 최근 7일
+    today_date = datetime.now().date()
     
-    # 2. 일별 히스토리 (전체 계산)
-    history = []
-    total_visitors = 0
-    total_requests = 0
+    target_end_str = end_date if end_date else today_date.strftime("%Y-%m-%d")
     
-    try:
-        # log 디렉토리의 모든 파일 조회 및 정렬
-        all_files = sorted([f for f in os.listdir(LOG_DIR) if f.startswith("service_log_") and f.endswith(".log")])
-        
-        for fname in all_files:
-            # 파일명에서 날짜 추출 (service_log_YYYYMMDD.log)
-            date_str = fname.replace("service_log_", "").replace(".log", "")
-            # 포맷 변경 YYYYMMDD -> YYYY-MM-DD
-            formatted_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
-            
-            fpath = os.path.join(LOG_DIR, fname)
-            day_logs = parse_log_file(fpath)
-            
-            if day_logs:
-                # 통계 계산
-                unique_ips = set(l['ip'] for l in day_logs)
-                day_reqs = len(day_logs)
-                
-                day_visitors = len(unique_ips)
-                
-                total_visitors += day_visitors
-                total_requests += day_reqs
-                
-                history.append({
-                    "date": formatted_date,
-                    "visitors": day_visitors,
-                    "requests": day_reqs
-                })
-                
-    except Exception as e:
-        print(f"Error processing history: {e}")
+    if start_date:
+        target_start_str = start_date
+    else:
+        # End date 기준 6일 전
+        end_dt = datetime.strptime(target_end_str, "%Y-%m-%d").date()
+        target_start_str = (end_dt - relativedelta(days=6)).strftime("%Y-%m-%d")
+
+    # JSON 서비스 호출
+    stats_data = stats_service.get_stats(target_start_str, target_end_str)
 
     return {
         "today_logs": logs,
-        "history": history[-7:], # 최근 7일만 그래프용으로 반환
-        "summary": {
-            "total_visitors": total_visitors,
-            "total_requests": total_requests
+        "history": stats_data["history"],
+        "summary": stats_data["summary"],
+        "period": {
+            "start": target_start_str,
+            "end": target_end_str
         }
     }

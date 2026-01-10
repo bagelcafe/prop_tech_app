@@ -17,3 +17,4 @@ log/
 
 # OS metadata
 .DS_Store
+stats.json

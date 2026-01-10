@@ -154,6 +154,27 @@
 
                 <div id="adBannerStats" class="ad-container"></div>
 
+                <!-- Stats Date Filter -->
+                <section class="search-section" style="margin-bottom: 2rem;">
+                    <div class="filters-group"
+                        style="display: flex; gap: 1rem; align-items: center; justify-content: flex-end;">
+                        <div class="filter-item">
+                            <label style="color: var(--text-secondary); margin-right: 0.5rem;">기간 선택</label>
+                            <div class="date-wrapper" style="display: inline-flex; align-items: center; gap: 0.5rem;">
+                                <input type="date" id="statsStart" class="month-input"
+                                    style="padding: 0.5rem; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-card); color: var(--text-primary);">
+                                <span style="color: var(--text-secondary);">~</span>
+                                <input type="date" id="statsEnd" class="month-input"
+                                    style="padding: 0.5rem; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-card); color: var(--text-primary);">
+                                <button id="searchStatsBtn"
+                                    style="padding: 0.5rem 1rem; border-radius: 8px; background: var(--accent-color); color: white; border: none; cursor: pointer;">
+                                    <i class="fa-solid fa-magnifying-glass"></i> 조회
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
                 <!-- Summary Cards -->
                 <div class="summary-grid">
                     <div class="summary-card">
@@ -213,7 +234,7 @@
         </div> <!-- End content-wrapper -->
     </div> <!-- End main-layout -->
 
-    <script src="script.js?v=20251220_v7"></script>
+    <script src="script.js?v=20260110_v2"></script>
 </body>
 
 </html>

@@ -18,7 +18,10 @@ const dom = {
     startPicker: document.getElementById('startMonth'),
     endPicker: document.getElementById('endMonth'),
     chartSection: document.getElementById('chartSection'),
-    chartCanvas: document.getElementById('priceChart')
+    chartCanvas: document.getElementById('priceChart'),
+    statsStart: document.getElementById('statsStart'),
+    statsEnd: document.getElementById('statsEnd'),
+    searchStatsBtn: document.getElementById('searchStatsBtn')
 };
 
 // Initialize Date Picker (Previous Month default)
@@ -31,6 +34,22 @@ function initDate() {
 
     dom.startPicker.value = prevMonthStr;
     dom.endPicker.value = prevMonthStr;
+}
+
+function initStatsDate() {
+    const today = new Date();
+    const ago7 = new Date();
+    ago7.setDate(today.getDate() - 6); // 7 days including today
+
+    const formatDate = (d) => {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${y}-${m}-${day}`;
+    };
+
+    if (dom.statsStart) dom.statsStart.value = formatDate(ago7);
+    if (dom.statsEnd) dom.statsEnd.value = formatDate(today);
 }
 
 // Search Region (Autocomplete)
@@ -333,12 +352,23 @@ function formatPrice(korString) {
 }
 
 // Event Listeners
+// Event Listeners
 dom.radioButtons.forEach(btn => btn.addEventListener('change', fetchData));
 dom.startPicker.addEventListener('change', fetchData);
 dom.endPicker.addEventListener('change', fetchData);
 dom.searchBtn.addEventListener('click', fetchData);
 
+// Move stats button binding here to be safe
+const statsBtn = document.getElementById('searchStatsBtn');
+if (statsBtn) {
+    console.log("[Stats] Search Button Found and Listener Added.");
+    statsBtn.addEventListener('click', fetchStats);
+} else {
+    console.error("[Stats] Search Button NOT FOUND in DOM.");
+}
+
 initDate();
+initStatsDate();
 
 // --- Sidebar Logic ---
 const navItems = document.querySelectorAll('.nav-links li');
@@ -439,7 +469,16 @@ async function fetchStats() {
     if (totalEl) totalEl.textContent = '-';
 
     try {
-        const res = await fetch('/api/stats');
+        let url = '/api/stats';
+        if (dom.statsStart && dom.statsEnd) {
+            const sDate = dom.statsStart.value;
+            const eDate = dom.statsEnd.value;
+            if (sDate && eDate) {
+                url += `?start_date=${sDate}&end_date=${eDate}`;
+            }
+        }
+
+        const res = await fetch(url);
         if (!res.ok) throw new Error("Failed to load logs");
 
         const data = await res.json();
