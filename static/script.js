@@ -375,6 +375,8 @@ const navItems = document.querySelectorAll('.nav-links li');
 // Fallback to querySelector if getElementById fails (handles cached HTML cases)
 const dashboardContent = document.getElementById('dashboardContent') || document.querySelector('.main-content');
 const statsContent = document.getElementById('statsContent');
+const kiwoomContent = document.getElementById('kiwoomContent');
+const kiwoomFrame = document.getElementById('kiwoomFrame');
 
 navItems.forEach(item => {
     item.addEventListener('click', () => {
@@ -392,12 +394,25 @@ navItems.forEach(item => {
         // Hide all first
         if (dashboardContent) dashboardContent.classList.add('hidden');
         if (statsContent) statsContent.classList.add('hidden');
+        if (kiwoomContent) kiwoomContent.classList.add('hidden');
 
         if (target === 'dashboard') {
             if (dashboardContent) dashboardContent.classList.remove('hidden');
         } else if (target === 'stats') {
             if (statsContent) statsContent.classList.remove('hidden');
             fetchStats();
+        } else if (target === 'kiwoom') {
+            if (kiwoomContent) {
+                kiwoomContent.classList.remove('hidden');
+                console.log("[Kiwoom] Menu clicked. Loading iframe...");
+
+                // Force load or reload if empty
+                const currentSrc = kiwoomFrame.getAttribute('src');
+                if (!currentSrc || currentSrc === "" || currentSrc === window.location.href) {
+                    console.log("[Kiwoom] Setting src to /kiwoom/");
+                    kiwoomFrame.src = "/kiwoom/";
+                }
+            }
         }
     });
 });

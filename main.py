@@ -8,7 +8,12 @@ import logging
 import os
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
+from datetime import datetime
+from dateutil.relativedelta import relativedelta
 from stats_service import stats_service
+
+# Kiwoom App Integration
+from kiwoom_fastapi.main import app as kiwoom_app
 
 # --- 로깅 설정 ---
 LOG_DIR = "log"
@@ -77,6 +82,9 @@ async def log_requests(request: Request, call_next):
 
 # Serve static files (HTML, CSS, JS)
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Mount Kiwoom Sub-App
+app.mount("/kiwoom", kiwoom_app)
 
 class RegionOption(BaseModel):
     code: str

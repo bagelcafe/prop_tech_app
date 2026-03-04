@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kiwoom Stock Insights</title>
+    <!-- Explicitly direct to sub-app static files with versioning -->
+    <link rel="stylesheet" href="/kiwoom/static/style.css?v=20260111_v3">
+    <style>
+        /* Force full width overriding any cached CSS */
+        .container {
+            max-width: 100% !important;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        h1 {
+            white-space: nowrap;
+        }
+
+        /* Ensure iframe body is wide */
+        body {
+            overflow-x: hidden;
+        }
+    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/luxon@3.3.0/build/global/luxon.min.js"></script>
+    <script
+        src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js"></script>
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>KIWOOM STOCK INSIGHTS</h1>
+            <p style="color: var(--text-secondary);">Real-time Market Data & Analysis</p>
+        </header>
+
+        <div class="search-section">
+            <input type="text" id="stockCode" placeholder="Enter Stock Code (e.g., 005930)" maxlength="6">
+            <button onclick="searchStock()">Search</button>
+        </div>
+
+        <div id="loading" style="display: none; text-align: center; margin-bottom: 2rem;">
+            <div class="spinner"></div>
+            <p>Fetching market data...</p>
+        </div>
+
+        <div class="dashboard" id="dashboard" style="display: none;">
+            <!-- Stock Info Card -->
+            <div class="card stagger-1">
+                <div class="stock-info-header">
+                    <div class="stk-nm" id="stkNm">---</div>
+                    <div class="stk-cd" id="stkCdDisplay">---</div>
+                </div>
+
+                <div class="price-section">
+                    <div class="cur-prc" id="curPrc">0</div>
+                    <div class="change-info" id="changeInfo">
+                        <span id="predPre">0</span>
+                        (<span id="fluRt">0%</span>)
+                    </div>
+                </div>
+
+                <div class="detail-grid">
+                    <div class="detail-item">
+                        <span class="detail-label">Open</span>
+                        <span class="detail-value" id="openPric">0</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">High</span>
+                        <span class="detail-value" id="highPric">0</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Low</span>
+                        <span class="detail-value" id="lowPric">0</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Volume</span>
+                        <span class="detail-value" id="trdeQty">0</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Chart Card -->
+            <div class="card chart-card stagger-2">
+                <canvas id="stockChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script src="/kiwoom/static/script.js?v=20260111_v2"></script>
+</body>
+
+</html>

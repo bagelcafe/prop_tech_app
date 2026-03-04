@@ -36,6 +36,11 @@
                     <div class="nav-icon"><i class="fa-solid fa-table-columns"></i></div>
                     <span>부동산 실거래가</span>
                 </li>
+                <!-- Sub-menu style indentation for Kiwoom -->
+                <li data-target="kiwoom" style="padding-left: 2rem; font-size: 0.9em;">
+                    <div class="nav-icon"><i class="fa-solid fa-arrow-trend-up"></i></div>
+                    <span>키움주식</span>
+                </li>
                 <li data-target="stats">
                     <div class="nav-icon"><i class="fa-solid fa-chart-pie"></i></div>
                     <span>사용자 접속 정보</span>
@@ -145,6 +150,13 @@
                 </div>
             </main>
 
+            <!-- Kiwoom Content (Iframe) -->
+            <!-- Use absolute positioning to force full width and height, ignoring flex layout constraints -->
+            <main id="kiwoomContent" class="main-content hidden"
+                style="position: absolute; left: 280px; top: 0; width: calc(100% - 280px); height: 100vh; padding: 0; overflow: hidden; display: block; z-index: 50; background: #0d1117;">
+                <iframe id="kiwoomFrame" src="" style="width: 100%; height: 100%; border: none;"></iframe>
+            </main>
+
             <!-- Stats Section -->
             <main id="statsContent" class="main-content hidden">
                 <header class="hero-header" style="margin-bottom: 2rem;">
@@ -234,7 +246,7 @@
         </div> <!-- End content-wrapper -->
     </div> <!-- End main-layout -->
 
-    <script src="script.js?v=20260110_v2"></script>
+    <script src="script.js?v=20260110_v4"></script>
 </body>
 
 </html>
