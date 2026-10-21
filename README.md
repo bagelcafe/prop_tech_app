@@ -78,3 +78,27 @@ prop_tech_app/
 
 4.  **접속**
     *   웹 브라우저에서 `http://localhost:8000` 접속
+
+## Docker 실행
+
+Docker Compose로 프론트엔드 빌드와 FastAPI 서버를 함께 실행합니다.
+
+```bash
+docker compose up --build -d
+```
+
+첫 실행 시 기존 프로젝트 루트의 `trades.db`와 `stats.json`을 `data/` 디렉터리로 자동 복사합니다. 이후 매매 이력, 통계, 로그는 `data/` 볼륨에 유지되므로 컨테이너를 재시작하거나 다시 생성해도 보존됩니다.
+
+Compose 대신 직접 Docker 컨테이너를 실행하려면 다음 스크립트를 사용합니다.
+
+```bash
+chmod +x docker-run.sh
+./docker-run.sh
+```
+
+기본 포트는 `8000`이며, 다른 포트를 사용하려면 `PORT=8080 ./docker-run.sh`처럼 실행합니다.
+
+```bash
+docker compose down
+docker compose up -d
+```

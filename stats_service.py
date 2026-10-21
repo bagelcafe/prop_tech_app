@@ -3,7 +3,8 @@ import os
 from datetime import datetime
 from threading import Lock
 
-STATS_FILE = "stats.json"
+DATA_DIR = os.getenv("APP_DATA_DIR", ".")
+STATS_FILE = os.path.join(DATA_DIR, "stats.json")
 
 class StatsService:
     def __init__(self):
@@ -12,6 +13,7 @@ class StatsService:
 
     def _ensure_file(self):
         """통계 파일이 없으면 초기화"""
+        os.makedirs(DATA_DIR, exist_ok=True)
         if not os.path.exists(STATS_FILE):
             initial_data = {
                 "summary": {

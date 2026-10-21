@@ -6,3 +6,4 @@ python-dateutil
 pydantic
 httpx
 jinja2
+websockets

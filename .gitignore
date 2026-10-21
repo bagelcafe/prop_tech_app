@@ -14,6 +14,22 @@ env/
 # Logs
 log/
 *.log
+data/
+
+# Node / Frontend
+node_modules/
+frontend/node_modules/
+
+# Frontend build artifacts
+static/dist/
+
+# Databases & runtime data
+*.db
+stats.json
+kiwoom_fastapi/stock_list_cache.json
+
+# Backup & temp files
+*.bak
 
 # OS metadata
 .DS_Store

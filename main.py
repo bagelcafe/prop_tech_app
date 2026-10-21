@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, FileResponse, HTMLResponse
 from services import service
 from typing import Optional, List
 from pydantic import BaseModel
@@ -16,7 +16,8 @@ from stats_service import stats_service
 from kiwoom_fastapi.main import app as kiwoom_app
 
 # --- 로깅 설정 ---
-LOG_DIR = "log"
+DATA_DIR = os.getenv("APP_DATA_DIR", ".")
+LOG_DIR = os.path.join(DATA_DIR, "log")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # --- 환경변수 수동 로드 ---
@@ -80,10 +81,24 @@ async def log_requests(request: Request, call_next):
         
     return response
 
-# Serve static files (HTML, CSS, JS)
+# React 빌드 경로
+_react_dist = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "dist")
+
+# React 빌드 에셋 서빙 (/assets/...)
+_react_assets = os.path.join(_react_dist, "assets")
+if os.path.isdir(_react_assets):
+    app.mount("/assets", StaticFiles(directory=_react_assets), name="react-assets")
+
+# 기타 정적 파일(프로필 이미지 등) — /static/ 에서 서빙
+# index.html 은 React SPA 가 담당하므로 제외됨
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# Mount Kiwoom Sub-App
+# React 조건검색 화면은 /kiwoom API 서브앱보다 먼저 처리해야 한다.
+@app.get("/kiwoom/conditions", include_in_schema=False)
+def serve_condition_search_page():
+    return _serve_spa()
+
+# Mount Kiwoom Sub-App (API only — UI is now served by the root React app)
 app.mount("/kiwoom", kiwoom_app)
 
 class RegionOption(BaseModel):
@@ -106,10 +121,6 @@ class TradeItem(BaseModel):
 @app.get("/api/config")
 def get_config():
     return {"enable_adsense": ENABLE_ADSENSE}
-
-@app.get("/")
-def read_root():
-    return RedirectResponse(url="/static/index.html")
 
 @app.get("/api/regions", response_model=List[RegionOption])
 def search_regions(query: str = Query(..., min_length=1)):
@@ -148,8 +159,9 @@ def get_stats(
 ):
     """통계 서비스(JSON)를 통해 접속 통계 반환"""
     
-    # 1. 오늘 날짜 로그 (실시간 모니터링용 - 기존 로직 유지)
+    # 1. 오늘 날짜 로그 (실시간 모니터링용)
     today_str = datetime.now().strftime("%Y%m%d")
+    today_date_str = datetime.now().strftime("%Y-%m-%d")
     log_filename = f"service_log_{today_str}.log"
     log_path = os.path.join(LOG_DIR, log_filename)
     
@@ -207,3 +219,22 @@ def get_stats(
             "end": target_end_str
         }
     }
+
+
+# ── SPA 라우트 — 반드시 모든 API 라우트보다 마지막에 등록 ─────────────────
+def _serve_spa():
+    react_index = os.path.join(_react_dist, "index.html")
+    if os.path.isfile(react_index):
+        return FileResponse(react_index)
+    return HTMLResponse(
+        content="<h2>React build not found.</h2><p>Run <code>cd frontend && npm run build</code></p>",
+        status_code=503,
+    )
+
+@app.get("/")
+def read_root():
+    return _serve_spa()
+
+@app.get("/{full_path:path}")
+def spa_fallback(full_path: str):
+    return _serve_spa()

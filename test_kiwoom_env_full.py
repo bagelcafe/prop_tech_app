@@ -4,7 +4,7 @@ import time
 import os
 
 # Load Token from .env
-ENV_PATH = "/home/bagelcafe/01_source/prop_tech_app/.env"
+ENV_PATH = ".env"
 access_token = ""
 if os.path.exists(ENV_PATH):
     with open(ENV_PATH, "r", encoding="utf-8") as f:
