@@ -7,6 +7,11 @@ services:
       - .env
     environment:
       APP_DATA_DIR: /app/data
+      # 감시봇 안전 기본값: 모의 모드(실주문 없음). 실거래 전환 시에만 "0".
+      BOT_DRY_RUN: "${BOT_DRY_RUN:-1}"
+      # 봇 tick 주기(초). 조건주문 rate limit 고려해 보수적으로.
+      BOT_TICK_INTERVAL: "${BOT_TICK_INTERVAL:-20}"
     volumes:
       - ./data:/app/data
     restart: unless-stopped
+    # 감시봇 중복 발주 방지: 반드시 단일 인스턴스로 실행(scale 금지).

@@ -22,6 +22,9 @@ frontend/node_modules/
 
 # Frontend build artifacts
 static/dist/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
 
 # Databases & runtime data
 *.db
@@ -33,3 +36,6 @@ kiwoom_fastapi/stock_list_cache.json
 
 # OS metadata
 .DS_Store
+
+# 대용량 바이너리 참고문서 (커밋 제외)
+*.xlsx

@@ -159,3 +159,63 @@ export interface WatchlistItem {
   high_drop_rate: number | null
   low_rise_rate: number | null
 }
+
+// ── Asset Dashboard types ──────────────────────────────────────────────────────
+export type BrokerKey = 'mirae' | 'namuh' | 'toss'
+
+export const BROKER_LABELS: Record<BrokerKey, string> = {
+  mirae: '미래에셋증권',
+  namuh: '나무증권',
+  toss: '토스증권',
+}
+
+export interface Holding {
+  id: number
+  broker: BrokerKey
+  stock_code: string
+  stock_name: string
+  quantity: number
+  avg_buy_price: number
+  cur_prc: number
+  eval_amount: number
+  profit_amount: number
+  profit_rate: number
+}
+
+export interface BrokerSummary {
+  label: string
+  total_buy_amount: number
+  total_eval_amount: number
+  total_profit_amount: number
+  total_profit_rate: number
+  holdings: Holding[]
+}
+
+export interface AssetTotal {
+  total_buy_amount: number
+  total_eval_amount: number
+  total_profit_amount: number
+  total_profit_rate: number
+}
+
+export interface AssetSummary {
+  brokers: Record<BrokerKey, BrokerSummary>
+  total: AssetTotal
+}
+
+export interface AssetTrendPoint {
+  date: string
+  mirae: number
+  namuh: number
+  toss: number
+  total: number
+}
+
+// 수동 입력/수정용
+export interface HoldingInput {
+  broker: BrokerKey
+  stock_code: string
+  stock_name: string
+  quantity: number
+  avg_buy_price: number
+}

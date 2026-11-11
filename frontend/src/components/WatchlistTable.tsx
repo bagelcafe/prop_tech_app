@@ -15,7 +15,20 @@ interface WatchlistTableProps {
   refreshTrigger?: number  // 외부에서 새로고침 트리거
 }
 
-type SortField = 'cur_prc' | 'change_rate' | 'evaluation_amount' | 'profit_rate' | 'profit_amount'
+type NumericSortField =
+  | 'cur_prc'
+  | 'change_rate'
+  | 'high_3m'
+  | 'low_3m'
+  | 'avg_buy_price'
+  | 'avg_sell_price'
+  | 'holding_qty'
+  | 'evaluation_amount'
+  | 'profit_rate'
+  | 'profit_amount'
+  | 'high_drop_rate'
+  | 'low_rise_rate'
+type SortField = 'stock_name' | NumericSortField
 type SortDirection = 'asc' | 'desc'
 
 const fmt = (v: number | null | undefined): string => {
@@ -79,10 +92,19 @@ export default function WatchlistTable({ onStockClick, refreshTrigger }: Watchli
 
   const sortedItems = sortField
     ? [...items].sort((first, second) => {
+        if (sortField === 'stock_name') {
+          const result = first.stock_name.localeCompare(second.stock_name, 'ko-KR')
+          return sortDirection === 'asc' ? result : -result
+        }
+
         const firstValue = sortField === 'change_rate' ? parseFloat(first.change_rate) : first[sortField]
         const secondValue = sortField === 'change_rate' ? parseFloat(second.change_rate) : second[sortField]
+        if (firstValue == null && secondValue == null) return 0
         if (firstValue == null) return 1
         if (secondValue == null) return -1
+        if (!Number.isFinite(firstValue) && !Number.isFinite(secondValue)) return 0
+        if (!Number.isFinite(firstValue)) return 1
+        if (!Number.isFinite(secondValue)) return -1
         return sortDirection === 'asc' ? firstValue - secondValue : secondValue - firstValue
       })
     : items
@@ -165,25 +187,25 @@ export default function WatchlistTable({ onStockClick, refreshTrigger }: Watchli
             <Table size="small" sx={{ '& th, & td': { px: 1, py: 0.75, fontSize: '0.8rem', whiteSpace: 'nowrap' } }}>
               <TableHead>
                 <TableRow sx={{ '& th': { fontWeight: 700, bgcolor: 'action.hover', borderBottom: '2px solid', borderColor: 'divider' } }}>
-                  <TableCell>종목명</TableCell>
+                  <TableCell>{sortableHeader('종목명', 'stock_name')}</TableCell>
                   <TableCell align="right">{sortableHeader('현재가', 'cur_prc')}</TableCell>
                   <TableCell align="right">{sortableHeader('등락률', 'change_rate')}</TableCell>
-                  <TableCell align="right">3M 고가</TableCell>
-                  <TableCell align="right">3M 저가</TableCell>
-                  <TableCell align="right">매수가</TableCell>
-                  <TableCell align="right">매도가</TableCell>
-                  <TableCell align="right">잔여 주식</TableCell>
+                  <TableCell align="right">{sortableHeader('3M 고가', 'high_3m')}</TableCell>
+                  <TableCell align="right">{sortableHeader('3M 저가', 'low_3m')}</TableCell>
+                  <TableCell align="right">{sortableHeader('매수가', 'avg_buy_price')}</TableCell>
+                  <TableCell align="right">{sortableHeader('매도가', 'avg_sell_price')}</TableCell>
+                  <TableCell align="right">{sortableHeader('잔여 주식', 'holding_qty')}</TableCell>
                   <TableCell align="right">{sortableHeader('총 평가금액', 'evaluation_amount')}</TableCell>
                   <TableCell align="right">{sortableHeader('수익률', 'profit_rate')}</TableCell>
                   <TableCell align="right">{sortableHeader('수익금', 'profit_amount')}</TableCell>
                   <TableCell align="right">
                     <Tooltip title="3개월 최고가 대비 현재가 하락률" arrow>
-                      <span>고가대비↓</span>
+                      {sortableHeader('고가대비↓', 'high_drop_rate')}
                     </Tooltip>
                   </TableCell>
                   <TableCell align="right">
                     <Tooltip title="3개월 최저가 대비 현재가 상승률" arrow>
-                      <span>저가대비↑</span>
+                      {sortableHeader('저가대비↑', 'low_rise_rate')}
                     </Tooltip>
                   </TableCell>
                   <TableCell align="center" sx={{ width: 40 }}></TableCell>

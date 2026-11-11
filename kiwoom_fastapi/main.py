@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import httpx
+import requests
 import uvicorn
 import os
 import logging
@@ -11,12 +12,60 @@ import sqlite3
 import asyncio
 import time
 import websockets
-from datetime import datetime
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from typing import Optional
 
 logger = logging.getLogger("kiwoom")
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    if getattr(application.state, "lifecycle_active", False):
+        raise RuntimeError("Kiwoom lifespan is already active")
+
+    application.state.lifecycle_active = True
+    application.state.snapshot_task = None
+    snapshot_task = None
+    try:
+        try:
+            init_db()
+        except Exception:
+            logger.exception("DB 초기화 실패: %s", DB_PATH)
+            raise
+        logger.info("DB 초기화 완료: %s", DB_PATH)
+
+        try:
+            token = await fetch_access_token()
+        except (httpx.HTTPError, ValueError):
+            logger.warning("토큰 초기화 실패: 앱 기동을 계속합니다.", exc_info=True)
+        else:
+            if token:
+                logger.info("Token 준비 완료")
+            else:
+                logger.warning("Token 발급 실패: 앱 기동을 계속합니다.")
+
+        snapshot_task = asyncio.create_task(snapshot_scheduler(), name="kiwoom-snapshot")
+        application.state.snapshot_task = snapshot_task
+        logger.info("자산 스냅샷 스케줄러 기동됨")
+        yield
+    finally:
+        try:
+            if snapshot_task is not None:
+                snapshot_task.cancel()
+                try:
+                    await snapshot_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("자산 스냅샷 스케줄러 종료 중 오류")
+                logger.info("자산 스냅샷 스케줄러 종료됨")
+        finally:
+            application.state.snapshot_task = None
+            application.state.lifecycle_active = False
+
+
+app = FastAPI(lifespan=lifespan)
 
 # ── 경로 설정 ──────────────────────────────────────────────────────────
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -73,6 +122,29 @@ def init_db():
                 added_at    TEXT NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS holdings (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                broker         TEXT NOT NULL,
+                stock_code     TEXT NOT NULL,
+                stock_name     TEXT NOT NULL,
+                quantity       INTEGER NOT NULL,
+                avg_buy_price  REAL NOT NULL,
+                updated_at     TEXT NOT NULL,
+                UNIQUE(broker, stock_code)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS asset_snapshots (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_date   TEXT NOT NULL,
+                broker          TEXT NOT NULL,
+                eval_amount     INTEGER NOT NULL,
+                buy_amount      INTEGER NOT NULL,
+                created_at      TEXT NOT NULL,
+                UNIQUE(snapshot_date, broker)
+            )
+        """)
         conn.commit()
 
 # ── Pydantic 모델 ─────────────────────────────────────────────────────
@@ -98,6 +170,24 @@ class TradeUpdateInput(BaseModel):
 class WatchlistInput(BaseModel):
     stock_code: str
     stock_name: str
+
+# ── 증권사 상수 ───────────────────────────────────────────────────────
+BROKERS = {
+    "mirae": "미래에셋증권",
+    "namuh": "나무증권",
+    "toss":  "토스증권",
+}
+
+class HoldingInput(BaseModel):
+    broker:        str            # mirae | namuh | toss
+    stock_code:    str
+    stock_name:    str
+    quantity:      int
+    avg_buy_price: float
+
+class HoldingUpdateInput(BaseModel):
+    quantity:      int
+    avg_buy_price: float
 
 # 런타임에 보관할 토큰 상태
 _token_store: dict = {
@@ -149,18 +239,6 @@ async def get_access_token() -> str:
     if not _token_store["access_token"]:
         await fetch_access_token()
     return _token_store["access_token"]
-
-
-# ── 앱 시작 시 토큰 자동 발급 ─────────────────────────────────────────
-@app.on_event("startup")
-async def startup_event():
-    init_db()
-    logger.info("서버 시작: Access Token 발급 시도...")
-    token = await fetch_access_token()
-    if token:
-        logger.info(f"Token 준비 완료: {token[:15]}...")
-    else:
-        logger.warning("Token 발급에 실패했습니다. 지정단말기 IP 등록 여부를 확인하세요.")
 
 
 # ── 라우터 ────────────────────────────────────────────────────────────
@@ -734,6 +812,619 @@ async def get_watchlist_summary():
     _summary_cache["data"] = result
     _summary_cache["timestamp"] = time.time()
     return result
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 자산 조회 대시보드 (Asset Dashboard)
+# ══════════════════════════════════════════════════════════════════════
+
+# 현재가 캐시 (code -> (price, timestamp))
+_price_cache: dict = {}
+PRICE_CACHE_TTL = 300  # 5분
+
+
+async def _fetch_current_price(client: httpx.AsyncClient, code: str) -> int:
+    """
+    키움 ka10001 로 단일 종목 현재가를 조회한다. 5분 메모리 캐시 사용.
+    실패 시 0 을 반환한다.
+    """
+    now = time.time()
+    cached = _price_cache.get(code)
+    if cached and (now - cached[1]) < PRICE_CACHE_TTL:
+        return cached[0]
+
+    access_token = await get_access_token()
+    if not access_token:
+        return 0
+
+    headers = {
+        "Content-Type": "application/json;charset=UTF-8",
+        "Authorization": f"Bearer {access_token}",
+        "api-id": "ka10001",
+    }
+    try:
+        res = await client.post(
+            f"{KIWOOM_HOST}/api/dostk/stkinfo",
+            headers=headers,
+            json={"stk_cd": code},
+        )
+        data = res.json()
+        # 토큰 만료 시 1회 재발급 후 재시도
+        if data.get("return_code") in (8005, 8003, 3):
+            token = await fetch_access_token()
+            headers["Authorization"] = f"Bearer {token}"
+            res = await client.post(
+                f"{KIWOOM_HOST}/api/dostk/stkinfo",
+                headers=headers,
+                json={"stk_cd": code},
+            )
+            data = res.json()
+
+        cur_prc = abs(int(data.get("cur_prc", "0") or "0"))
+        _price_cache[code] = (cur_prc, now)
+        return cur_prc
+    except Exception as e:
+        logger.error(f"현재가 조회 실패({code}): {e}")
+        return 0
+
+
+# ── 보유 종목 CRUD ─────────────────────────────────────────────────────
+
+@app.get("/api/holdings")
+async def get_holdings(broker: Optional[str] = None):
+    """보유 종목 목록 조회 (옵션: broker 필터)"""
+    with get_db() as conn:
+        if broker:
+            rows = conn.execute(
+                "SELECT * FROM holdings WHERE broker = ? ORDER BY id ASC", (broker,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM holdings ORDER BY broker ASC, id ASC"
+            ).fetchall()
+    return {"items": [dict(r) for r in rows]}
+
+
+@app.post("/api/holdings")
+async def upsert_holding(item: HoldingInput):
+    """보유 종목 추가/수정 (broker + stock_code 기준 upsert)"""
+    if item.broker not in BROKERS:
+        raise HTTPException(status_code=400, detail=f"알 수 없는 증권사: {item.broker}")
+    if item.quantity <= 0 or item.avg_buy_price <= 0:
+        raise HTTPException(status_code=400, detail="수량/매수가는 0보다 커야 합니다.")
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO holdings (broker, stock_code, stock_name, quantity, avg_buy_price, updated_at)
+               VALUES (?,?,?,?,?,?)
+               ON CONFLICT(broker, stock_code)
+               DO UPDATE SET stock_name=excluded.stock_name,
+                             quantity=excluded.quantity,
+                             avg_buy_price=excluded.avg_buy_price,
+                             updated_at=excluded.updated_at""",
+            (item.broker, item.stock_code, item.stock_name,
+             item.quantity, item.avg_buy_price, now),
+        )
+        conn.commit()
+    return {"success": True}
+
+
+@app.put("/api/holdings/{holding_id}")
+async def update_holding(holding_id: int, payload: HoldingUpdateInput):
+    """보유 종목 수량/매수가 수정"""
+    if payload.quantity <= 0 or payload.avg_buy_price <= 0:
+        raise HTTPException(status_code=400, detail="수량/매수가는 0보다 커야 합니다.")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with get_db() as conn:
+        affected = conn.execute(
+            "UPDATE holdings SET quantity=?, avg_buy_price=?, updated_at=? WHERE id=?",
+            (payload.quantity, payload.avg_buy_price, now, holding_id),
+        ).rowcount
+        conn.commit()
+    if not affected:
+        raise HTTPException(status_code=404, detail="보유 종목을 찾을 수 없습니다.")
+    return {"success": True}
+
+
+@app.delete("/api/holdings/{holding_id}")
+async def delete_holding(holding_id: int):
+    """보유 종목 삭제"""
+    with get_db() as conn:
+        affected = conn.execute(
+            "DELETE FROM holdings WHERE id = ?", (holding_id,)
+        ).rowcount
+        conn.commit()
+    if not affected:
+        raise HTTPException(status_code=404, detail="보유 종목을 찾을 수 없습니다.")
+    return {"success": True}
+
+
+# ── 자산 요약 ──────────────────────────────────────────────────────────
+
+@app.get("/api/assets/summary")
+async def get_assets_summary():
+    """
+    증권사별 보유 종목 + 현재가 + 파생지표 + 증권사별/전체 요약 반환.
+    """
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM holdings ORDER BY broker ASC, id ASC").fetchall()
+
+    # 증권사별 구조 초기화
+    brokers: dict = {
+        key: {
+            "label": label,
+            "total_buy_amount": 0,
+            "total_eval_amount": 0,
+            "total_profit_amount": 0,
+            "total_profit_rate": 0.0,
+            "holdings": [],
+        }
+        for key, label in BROKERS.items()
+    }
+
+    # 고유 종목 현재가 조회
+    unique_codes = {r["stock_code"] for r in rows}
+    prices: dict = {}
+    async with httpx.AsyncClient(timeout=15) as client:
+        for code in unique_codes:
+            prices[code] = await _fetch_current_price(client, code)
+            await asyncio.sleep(0.3)  # Rate Limit 대응
+
+    for r in rows:
+        broker = r["broker"]
+        if broker not in brokers:
+            continue
+        cur_prc = prices.get(r["stock_code"], 0)
+        qty = r["quantity"]
+        avg_buy = r["avg_buy_price"]
+        buy_amount = round(avg_buy * qty)
+        eval_amount = cur_prc * qty
+        profit_amount = eval_amount - buy_amount
+        profit_rate = round((cur_prc - avg_buy) / avg_buy * 100, 2) if avg_buy > 0 else 0.0
+
+        brokers[broker]["holdings"].append({
+            "id": r["id"],
+            "broker": broker,
+            "stock_code": r["stock_code"],
+            "stock_name": r["stock_name"],
+            "quantity": qty,
+            "avg_buy_price": avg_buy,
+            "cur_prc": cur_prc,
+            "eval_amount": eval_amount,
+            "profit_amount": profit_amount,
+            "profit_rate": profit_rate,
+        })
+        brokers[broker]["total_buy_amount"] += buy_amount
+        brokers[broker]["total_eval_amount"] += eval_amount
+
+    # 증권사별 요약 계산
+    total = {"total_buy_amount": 0, "total_eval_amount": 0, "total_profit_amount": 0, "total_profit_rate": 0.0}
+    for b in brokers.values():
+        b["total_profit_amount"] = b["total_eval_amount"] - b["total_buy_amount"]
+        b["total_profit_rate"] = (
+            round(b["total_profit_amount"] / b["total_buy_amount"] * 100, 2)
+            if b["total_buy_amount"] > 0 else 0.0
+        )
+        total["total_buy_amount"] += b["total_buy_amount"]
+        total["total_eval_amount"] += b["total_eval_amount"]
+
+    total["total_profit_amount"] = total["total_eval_amount"] - total["total_buy_amount"]
+    total["total_profit_rate"] = (
+        round(total["total_profit_amount"] / total["total_buy_amount"] * 100, 2)
+        if total["total_buy_amount"] > 0 else 0.0
+    )
+
+    return {"brokers": brokers, "total": total}
+
+
+# ── 자산 추이 ──────────────────────────────────────────────────────────
+
+@app.get("/api/assets/trend")
+async def get_assets_trend(days: int = 30):
+    """일별 증권사별 평가금액 + 합산 추이 (asset_snapshots 기반)"""
+    if days <= 0:
+        days = 30
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT snapshot_date, broker, eval_amount
+               FROM asset_snapshots
+               ORDER BY snapshot_date ASC""",
+        ).fetchall()
+
+    # 날짜별로 집계
+    by_date: dict = {}
+    for r in rows:
+        d = r["snapshot_date"]
+        if d not in by_date:
+            by_date[d] = {"date": d, "mirae": 0, "namuh": 0, "toss": 0, "total": 0}
+        if r["broker"] in BROKERS:
+            by_date[d][r["broker"]] = r["eval_amount"]
+
+    # total 계산 및 최근 days 개로 제한
+    series = []
+    for d in sorted(by_date.keys()):
+        point = by_date[d]
+        point["total"] = point["mirae"] + point["namuh"] + point["toss"]
+        series.append(point)
+    series = series[-days:]
+
+    return {"series": series}
+
+
+# ── 일별 스냅샷 기록 ────────────────────────────────────────────────────
+
+async def record_daily_snapshot():
+    """holdings 전 종목 현재가 조회 → 증권사별 평가/매수금액 계산 → asset_snapshots upsert"""
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM holdings").fetchall()
+
+    if not rows:
+        logger.info("스냅샷: 보유 종목이 없어 기록을 건너뜁니다.")
+        return
+
+    unique_codes = {r["stock_code"] for r in rows}
+    prices: dict = {}
+    async with httpx.AsyncClient(timeout=15) as client:
+        for code in unique_codes:
+            prices[code] = await _fetch_current_price(client, code)
+            await asyncio.sleep(0.3)
+
+    agg: dict = {key: {"eval": 0, "buy": 0} for key in BROKERS}
+    for r in rows:
+        broker = r["broker"]
+        if broker not in agg:
+            continue
+        cur_prc = prices.get(r["stock_code"], 0)
+        agg[broker]["eval"] += cur_prc * r["quantity"]
+        agg[broker]["buy"] += round(r["avg_buy_price"] * r["quantity"])
+
+    # 토스는 실계좌 조회 값을 우선 사용하고, 실패 시 수동 등록 내역으로 대체
+    try:
+        from toss_service import get_holdings as get_toss_holdings
+        from fastapi import Response
+        toss = await asyncio.to_thread(get_toss_holdings, Response())
+        agg["toss"] = {
+            "eval": round(float(toss["total_eval_krw"])),
+            "buy": round(float(toss["total_buy_krw"])),
+        }
+    except Exception as e:
+        logger.warning(f"스냅샷: 토스 실계좌 조회 실패, 수동 등록 내역 사용: {e}")
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with get_db() as conn:
+        for broker, v in agg.items():
+            conn.execute(
+                """INSERT INTO asset_snapshots (snapshot_date, broker, eval_amount, buy_amount, created_at)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(snapshot_date, broker)
+                   DO UPDATE SET eval_amount=excluded.eval_amount,
+                                 buy_amount=excluded.buy_amount,
+                                 created_at=excluded.created_at""",
+                (today, broker, v["eval"], v["buy"], now),
+            )
+        conn.commit()
+    logger.info(f"스냅샷 기록 완료: {today}")
+
+
+def _toss_daily_closes(symbol: str, count: int) -> dict:
+    """토스 일봉 조회 → {KST 날짜: 종가}"""
+    from toss_service import get_toss_data
+    result = get_toss_data("/api/v1/candles", params={"symbol": symbol, "interval": "1d", "count": count})
+    closes = {}
+    for c in result.get("candles", []):
+        closes[c["timestamp"][:10]] = float(c["closePrice"])
+    return closes
+
+
+def _collect_positions():
+    """현재 보유종목 → ([(broker, symbol, quantity, is_usd, buy_krw)], 환율)"""
+    from toss_service import get_holdings as get_toss_holdings
+    from fastapi import Response
+
+    positions = []
+    rate = 1.0
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM holdings").fetchall()
+    for r in rows:
+        if r["broker"] in ("mirae", "namuh"):
+            positions.append((r["broker"], r["stock_code"], r["quantity"], False, r["avg_buy_price"] * r["quantity"]))
+    try:
+        toss = get_toss_holdings(Response())
+        rate = float(toss["exchange_rate"]) if toss["exchange_rate"] else 1.0
+        for account in toss["accounts"]:
+            for item in account["items"]:
+                usd = item["currency"] == "USD"
+                buy = float(item["marketValue"]["purchaseAmount"]) * (rate if usd else 1)
+                positions.append(("toss", item["symbol"], float(item["quantity"]), usd, buy))
+    except Exception as e:
+        logger.warning(f"토스 실계좌 조회 실패, 수동 등록 내역 사용: {e}")
+        for r in rows:
+            if r["broker"] == "toss":
+                positions.append(("toss", r["stock_code"], r["quantity"], False, r["avg_buy_price"] * r["quantity"]))
+    return positions, rate
+
+
+def _rebuild_history_sync(days: int) -> dict:
+    """현재 보유종목 기준 과거 종가로 증권사별 일별 자산(asset_snapshots)을 재계산"""
+    positions, rate = _collect_positions()
+
+    start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    count = min(200, days + 10)
+    closes: dict = {}
+    for _, symbol, _, _, _ in positions:
+        if symbol in closes:
+            continue
+        try:
+            closes[symbol] = _toss_daily_closes(symbol, count)
+        except Exception as e:
+            logger.warning(f"자산 이력 재계산: {symbol} 일봉 조회 실패: {e}")
+            closes[symbol] = {}
+        time.sleep(0.2)
+
+    # 국내 종목 거래일을 기준 날짜로 사용 (미국 종목은 해당일 이전 최근 종가 사용)
+    kr_dates = set()
+    for _, symbol, _, usd, _ in positions:
+        if not usd:
+            kr_dates.update(d for d in closes[symbol] if d >= start)
+    dates = sorted(kr_dates)
+    if not dates:
+        return {"dates": 0}
+
+    def close_on(symbol: str, d: str):
+        series = closes[symbol]
+        if d in series:
+            return series[d]
+        earlier = [k for k in series if k < d]
+        return series[max(earlier)] if earlier else None
+
+    agg = {d: {b: {"eval": 0.0, "buy": 0.0} for b in BROKERS} for d in dates}
+    for broker, symbol, qty, usd, buy in positions:
+        if broker not in BROKERS:
+            continue
+        for d in dates:
+            price = close_on(symbol, d)
+            if price is None:
+                continue
+            agg[d][broker]["eval"] += price * qty * (rate if usd else 1)
+            agg[d][broker]["buy"] += buy
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with get_db() as conn:
+        conn.execute("DELETE FROM asset_snapshots WHERE snapshot_date >= ?", (dates[0],))
+        for d in dates:
+            for broker, v in agg[d].items():
+                conn.execute(
+                    "INSERT INTO asset_snapshots (snapshot_date, broker, eval_amount, buy_amount, created_at) VALUES (?,?,?,?,?)",
+                    (d, broker, round(v["eval"]), round(v["buy"]), now),
+                )
+        conn.commit()
+    logger.info(f"자산 이력 재계산 완료: {dates[0]} ~ {dates[-1]} ({len(dates)}일)")
+    return {"dates": len(dates), "from": dates[0], "to": dates[-1]}
+
+
+def _value_at_date_sync(target: str) -> dict:
+    """현재 보유종목을 target 날짜(이전 최근 거래일) 종가로 평가한 증권사별 금액"""
+    positions, rate = _collect_positions()
+    closes: dict = {}
+    brokers = {b: 0.0 for b in BROKERS}
+    missing = []
+    for broker, symbol, qty, usd, _ in positions:
+        if symbol not in closes:
+            try:
+                closes[symbol] = _toss_closes_since(symbol, target)
+            except Exception as e:
+                logger.warning(f"{symbol} 일봉 조회 실패: {e}")
+                closes[symbol] = {}
+            time.sleep(0.2)
+        earlier = [k for k in closes[symbol] if k <= target]
+        if not earlier or broker not in brokers:
+            missing.append(symbol)
+            continue
+        brokers[broker] += closes[symbol][max(earlier)] * qty * (rate if usd else 1)
+    return {
+        "date": target,
+        "brokers": {b: round(v) for b, v in brokers.items()},
+        "total": round(sum(brokers.values())),
+        "missing": missing,
+    }
+
+
+INDEX_SYMBOLS = {"kospi": "^KS11", "sp500": "^GSPC", "nasdaq": "^IXIC"}
+_monthly_cache: dict = {}
+
+
+def _toss_closes_since(symbol: str, since: str) -> dict:
+    """토스 일봉을 since(YYYY-MM-DD) 이전까지 페이지네이션하며 {날짜: 종가} 로 반환"""
+    from toss_service import get_toss_data
+    closes: dict = {}
+    before = None
+    for _ in range(4):
+        params = {"symbol": symbol, "interval": "1d", "count": 200}
+        if before:
+            params["before"] = before
+        result = get_toss_data("/api/v1/candles", params=params)
+        candles = result.get("candles", [])
+        for c in candles:
+            closes[c["timestamp"][:10]] = float(c["closePrice"])
+        before = result.get("nextBefore")
+        if not candles or not before or min(closes) <= since:
+            break
+        time.sleep(0.2)
+    return closes
+
+
+def _index_prices(symbol: str):
+    """Yahoo Finance 일봉 ({날짜: 시가}, {날짜: 종가}) (최근 2년)"""
+    res = requests.get(
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
+        params={"range": "2y", "interval": "1d"}, headers={"User-Agent": "Mozilla/5.0"}, timeout=15,
+    )
+    res.raise_for_status()
+    result = res.json()["chart"]["result"][0]
+    offset = result["meta"].get("gmtoffset", 0)
+    quote = result["indicators"]["quote"][0]
+    opens: dict = {}
+    closes: dict = {}
+    for ts, o, c in zip(result["timestamp"], quote["open"], quote["close"]):
+        day = datetime.utcfromtimestamp(ts + offset).strftime("%Y-%m-%d")
+        if o is not None:
+            opens[day] = float(o)
+        if c is not None:
+            closes[day] = float(c)
+    return opens, closes
+
+
+def _monthly_returns_sync(year: int) -> dict:
+    """1/2 종가 기준 대비, 매월 1일 현재 보유종목 평가금액 수익률 + 지수 수익률 (1/2 = 0%)"""
+    today = datetime.now()
+    # 기준일은 연초 첫 거래일(1/2), 이후는 매월 1일
+    dates = [f"{year}-01-02"] + [f"{year}-{m:02d}-01" for m in range(2, 13) if datetime(year, m, 1) <= today]
+    dates.append(today.strftime("%Y-%m-%d"))
+    positions, rate = _collect_positions()
+
+    def close_on(series: dict, d: str):
+        earlier = [k for k in series if k <= d]
+        return series[max(earlier)] if earlier else None
+
+    closes: dict = {}
+    for _, symbol, _, _, _ in positions:
+        if symbol not in closes:
+            try:
+                closes[symbol] = _toss_closes_since(symbol, dates[0])
+            except Exception as e:
+                logger.warning(f"월별 수익률: {symbol} 일봉 조회 실패: {e}")
+                closes[symbol] = {}
+            time.sleep(0.2)
+
+    # 기준일(1/2)에 시세가 없는 종목은 모든 날짜에서 제외해 비교 기준을 맞춘다
+    excluded = sorted({sym for _, sym, _, _, _ in positions if close_on(closes[sym], dates[0]) is None})
+    values = []
+    for d in dates:
+        total = 0.0
+        for _, symbol, qty, usd, _ in positions:
+            if symbol in excluded:
+                continue
+            price = close_on(closes[symbol], d)
+            if price is not None:
+                total += price * qty * (rate if usd else 1)
+        values.append(total)
+
+    index_values = {}
+    for key, sym in INDEX_SYMBOLS.items():
+        try:
+            opens, closes_ = _index_prices(sym)
+            # 지수는 해당일 시가 기준: 1일이 휴장이면 다음 거래일 시가, 마지막(현재)은 최신 종가
+            index_values[key] = [
+                close_on(closes_, d) if d == dates[-1] else
+                next((opens[k] for k in sorted(opens) if k >= d), close_on(closes_, d))
+                for d in dates
+            ]
+        except Exception as e:
+            logger.warning(f"월별 수익률: 지수 {sym} 조회 실패: {e}")
+            index_values[key] = [None] * len(dates)
+
+    def pct(vals):
+        base = vals[0]
+        return [None if (v is None or not base) else round((v / base - 1) * 100, 2) for v in vals]
+
+    series = []
+    p, k, sp, nq = pct(values), pct(index_values["kospi"]), pct(index_values["sp500"]), pct(index_values["nasdaq"])
+    for i, d in enumerate(dates):
+        series.append({"date": d, "value": round(values[i]), "portfolio": p[i], "kospi": k[i], "sp500": sp[i], "nasdaq": nq[i]})
+    return {"series": series, "excluded": excluded}
+
+
+@app.get("/api/assets/monthly-returns")
+async def monthly_returns(year: int = 0):
+    """매월 1일 기준 포트폴리오(현재 보유종목) vs KOSPI/S&P500/NASDAQ 수익률. 1시간 캐시"""
+    year = year or datetime.now().year
+    cached = _monthly_cache.get(year)
+    if cached and time.time() - cached[0] < 3600:
+        return cached[1]
+    data = await asyncio.to_thread(_monthly_returns_sync, year)
+    _monthly_cache[year] = (time.time(), data)
+    return data
+
+
+@app.get("/api/assets/value-at")
+async def value_at_date(date: str = "2026-06-19"):
+    """현재 보유종목을 특정 과거 날짜 종가로 평가한 금액 (최대 약 1년 전까지)"""
+    try:
+        d = datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="date 형식은 YYYY-MM-DD 입니다.")
+    if (datetime.now() - d).days > 700 or d > datetime.now():
+        raise HTTPException(status_code=400, detail="date 는 오늘 기준 700일 이내의 과거여야 합니다.")
+    return await asyncio.to_thread(_value_at_date_sync, date)
+
+
+@app.post("/api/assets/rebuild-history")
+async def rebuild_history(days: int = 30):
+    """현재 보유종목 기준, 과거 종가로 일별 자산 추이를 재계산 (days: 1~190)"""
+    days = max(1, min(days, 190))
+    return {"success": True, **await asyncio.to_thread(_rebuild_history_sync, days)}
+
+
+@app.post("/api/assets/snapshot")
+async def trigger_snapshot():
+    """관리/테스트용 즉시 스냅샷 기록"""
+    await record_daily_snapshot()
+    return {"success": True}
+
+
+# ── 장 마감 후 스냅샷 스케줄러 (평일 15:40 KST) ─────────────────────────
+from datetime import timezone
+
+KST = timezone(timedelta(hours=9))
+SNAPSHOT_HOUR = 15
+SNAPSHOT_MINUTE = 40
+
+
+def _next_snapshot_time(now: datetime) -> datetime:
+    """now 이후 가장 가까운 평일 15:40 KST 를 반환"""
+    candidate = now.replace(hour=SNAPSHOT_HOUR, minute=SNAPSHOT_MINUTE, second=0, microsecond=0)
+    if candidate <= now:
+        candidate += timedelta(days=1)
+    # 주말(토=5, 일=6) 스킵
+    while candidate.weekday() >= 5:
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def _has_today_snapshot() -> bool:
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM asset_snapshots WHERE snapshot_date = ? LIMIT 1", (today,)
+        ).fetchone()
+    return row is not None
+
+
+async def snapshot_scheduler():
+    """매 평일 15:40 KST 에 자산 스냅샷을 기록하는 백그라운드 루프"""
+    # 서버 기동 시 누락 보정: 평일 && 15:40 지남 && 당일 스냅샷 없음
+    try:
+        now = datetime.now(KST)
+        is_weekday = now.weekday() < 5
+        past_close = (now.hour, now.minute) >= (SNAPSHOT_HOUR, SNAPSHOT_MINUTE)
+        if is_weekday and past_close and not _has_today_snapshot():
+            logger.info("스냅샷 누락 보정 기록 시도")
+            await record_daily_snapshot()
+    except Exception as e:
+        logger.error(f"스냅샷 보정 실패: {e}")
+
+    while True:
+        now = datetime.now(KST)
+        next_run = _next_snapshot_time(now)
+        sleep_sec = (next_run - now).total_seconds()
+        logger.info(f"다음 스냅샷 예정: {next_run.isoformat()} ({sleep_sec:.0f}s 후)")
+        await asyncio.sleep(sleep_sec)
+        try:
+            await record_daily_snapshot()
+        except Exception as e:
+            logger.error(f"스냅샷 기록 실패: {e}")
 
 
 if __name__ == "__main__":

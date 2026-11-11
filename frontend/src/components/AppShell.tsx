@@ -8,11 +8,13 @@ import {
 import ApartmentIcon from '@mui/icons-material/Apartment'
 import ShowChartIcon from '@mui/icons-material/ShowChart'
 import BarChartIcon from '@mui/icons-material/BarChart'
+import AccountBalanceWalletIcon from '@mui/icons-material/AccountBalanceWallet'
 import OpenInNewIcon from '@mui/icons-material/OpenInNew'
 import CoffeeIcon from '@mui/icons-material/Coffee'
 import MenuIcon from '@mui/icons-material/Menu'
 import MenuOpenIcon from '@mui/icons-material/MenuOpen'
 import ManageSearchIcon from '@mui/icons-material/ManageSearch'
+import PublicIcon from '@mui/icons-material/Public'
 import ExpandLessIcon from '@mui/icons-material/ExpandLess'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import { fetchStats } from '../api'
@@ -39,6 +41,7 @@ export default function AppShell({ children }: Props) {
 
   // PC: 기본 열림, 모바일: 기본 닫힘
   const [open, setOpen] = useState(!isMobile)
+  const [assetsOpen, setAssetsOpen] = useState(pathname.startsWith('/assets'))
   const [kiwoomOpen, setKiwoomOpen] = useState(pathname.startsWith('/kiwoom'))
 
   const [todayVisitors, setTodayVisitors] = useState<string>('-')
@@ -121,6 +124,31 @@ export default function AppShell({ children }: Props) {
             </ListItem>
           ))}
           <ListItem disablePadding>
+            <ListItemButton selected={pathname.startsWith('/assets')} onClick={() => setAssetsOpen((value) => !value)}>
+              <ListItemIcon sx={{ minWidth: 36, color: pathname.startsWith('/assets') ? 'primary.main' : 'text.secondary' }}>
+                <AccountBalanceWalletIcon />
+              </ListItemIcon>
+              <ListItemText primary="자산 조회" primaryTypographyProps={{ fontSize: '0.875rem', fontWeight: pathname.startsWith('/assets') ? 600 : 400 }} />
+              {assetsOpen ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+            </ListItemButton>
+          </ListItem>
+          <Collapse in={assetsOpen} timeout="auto" unmountOnExit>
+            <List disablePadding>
+              <ListItem disablePadding>
+                <ListItemButton sx={{ pl: 4.5 }} selected={pathname === '/assets'} onClick={() => handleNavClick('/assets')}>
+                  <ListItemIcon sx={{ minWidth: 32, color: pathname === '/assets' ? 'primary.main' : 'text.secondary' }}><AccountBalanceWalletIcon fontSize="small" /></ListItemIcon>
+                  <ListItemText primary="국내종목" primaryTypographyProps={{ fontSize: '0.825rem', fontWeight: pathname === '/assets' ? 600 : 400 }} />
+                </ListItemButton>
+              </ListItem>
+              <ListItem disablePadding>
+                <ListItemButton sx={{ pl: 4.5 }} selected={pathname === '/assets/overseas'} onClick={() => handleNavClick('/assets/overseas')}>
+                  <ListItemIcon sx={{ minWidth: 32, color: pathname === '/assets/overseas' ? 'primary.main' : 'text.secondary' }}><PublicIcon fontSize="small" /></ListItemIcon>
+                  <ListItemText primary="해외종목" primaryTypographyProps={{ fontSize: '0.825rem', fontWeight: pathname === '/assets/overseas' ? 600 : 400 }} />
+                </ListItemButton>
+              </ListItem>
+            </List>
+          </Collapse>
+          <ListItem disablePadding>
             <ListItemButton selected={pathname.startsWith('/kiwoom')} onClick={() => setKiwoomOpen((value) => !value)}>
               <ListItemIcon sx={{ minWidth: 36, color: pathname.startsWith('/kiwoom') ? 'primary.main' : 'text.secondary' }}>
                 <ShowChartIcon />
@@ -145,6 +173,14 @@ export default function AppShell({ children }: Props) {
               </ListItem>
             </List>
           </Collapse>
+          <ListItem disablePadding>
+            <ListItemButton selected={pathname === '/toss'} onClick={() => handleNavClick('/toss')}>
+              <ListItemIcon sx={{ minWidth: 36, color: pathname === '/toss' ? 'primary.main' : 'text.secondary' }}>
+                <ShowChartIcon />
+              </ListItemIcon>
+              <ListItemText primary="토스주식" primaryTypographyProps={{ fontSize: '0.875rem', fontWeight: pathname === '/toss' ? 600 : 400 }} />
+            </ListItemButton>
+          </ListItem>
         </List>
       </Box>
 

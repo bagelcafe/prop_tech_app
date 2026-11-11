@@ -11,11 +11,19 @@ from dateutil.relativedelta import relativedelta
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from stats_service import stats_service
+from contextlib import asynccontextmanager
 
 # Kiwoom App Integration
 from kiwoom_fastapi.main import app as kiwoom_app
+from toss_service import router as toss_router
+from toss_realtime import router as toss_realtime_router
+from bot_router import router as bot_router
+import trailing_bot
 
 # --- 로깅 설정 ---
+# 앱/봇 로거를 INFO로 올려 감시봇 tick·서킷브레이커 로그가 컨테이너 stdout에 보이도록 한다.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.getLogger("trailing_bot").setLevel(logging.INFO)
 DATA_DIR = os.getenv("APP_DATA_DIR", ".")
 LOG_DIR = os.path.join(DATA_DIR, "log")
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -51,7 +59,27 @@ def get_today_logger():
         
     return logger
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    import asyncio
+    async with kiwoom_app.router.lifespan_context(kiwoom_app):
+        bot_task = asyncio.create_task(trailing_bot.tick_loop(), name="trailing-bot-tick")
+        try:
+            yield
+        finally:
+            bot_task.cancel()
+            try:
+                await bot_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logging.getLogger("trailing_bot").exception("봇 tick 루프 종료 중 오류")
+
+
+app = FastAPI(lifespan=lifespan)
+app.include_router(toss_router)
+app.include_router(toss_realtime_router)
+app.include_router(bot_router)
 
 # 미들웨어: 접속 기록 로깅
 @app.middleware("http")
